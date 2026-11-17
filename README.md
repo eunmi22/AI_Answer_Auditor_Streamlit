@@ -108,3 +108,12 @@ tests/test_autodataset_v4.py  # 자동분류·생성·출처 검증·내보내�
 - RAGAS: https://docs.ragas.io/
 - OpenAI: https://platform.openai.com/docs/
 - Gemini: https://ai.google.dev/gemini-api/docs/
+
+## v4.1 수정: 평가 데이터셋 기준답변 자동 연결
+
+- ②에서 선택한 케이스의 `question`, `reference_answer`, `candidate_answer`를 ③ 입력란에 자동 동기화합니다.
+- 업로드 직후에는 첫 번째 자동생성 사례가 ③에 표시되고, ② 케이스 선택 변경에도 즉시 반영됩니다.
+- 자동생성된 기준답변은 **초안/미확정**으로 표시합니다. ②의 원문 검토·확정 시 검증 상태가 ③에 이어집니다.
+- 사용자가 ③의 질문 또는 기준답변을 수정하면 기존 확정은 무효화됩니다.
+- `auditor/qa_flow.py`에서 상태 연동 및 정답 검증 서명을 분리해 관리합니다.
+- 상세 절차: `기준답변_자동연결_사용안내.md`.

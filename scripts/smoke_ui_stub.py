@@ -67,7 +67,11 @@ sys.path.insert(0,str(Path(path).parent))
 for tries in range(4):
  try:
   runpy.run_path(path,run_name='__main__')
-  print('SUCCESS UI CONTROL FLOW, after reruns',tries,'dataset count',len(st.session_state.datasets),'domain',st.session_state.auto_domain)
+  assert st.session_state.selected_case_id == st.session_state.datasets[0]['case_id']
+  assert st.session_state.manual_reference == st.session_state.datasets[0]['reference_answer']
+  assert not st.session_state.dataset_reference_confirmed
+  print('SUCCESS UI CONTROL FLOW, after reruns',tries,'dataset count',len(st.session_state.datasets),
+        'domain',st.session_state.auto_domain,'reference autofilled',bool(st.session_state.manual_reference))
   break
  except Rerun:
   print('rerun #',tries+1)

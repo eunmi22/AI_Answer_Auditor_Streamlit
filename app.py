@@ -9,6 +9,8 @@ from auditor.documents import parse_uploads
 from auditor.autodataset import (DOMAINS, local_drafts, generate_ai_drafts,
                                 classify_documents, dataset_csv_bytes, dataset_excel_bytes)
 from auditor.datasets import SAMPLE_CASES, template_csv, parse_dataset, DATASET_CATEGORIES
+from auditor.qa_flow import (apply_case_to_qa, reference_signature, is_reference_verified,
+                              can_use_reviewed_case_reference, confirm_loaded_case_if_matching)
 from auditor.evaluation import evaluate, judges_disagree, normalize_rubric
 from auditor.ragas_engine import (run_ragas, RAGAS_NON_LLM, RAGAS_LLM, selected_judges,
                                   merge_assessment_status, ragas_metric_requirements)
@@ -82,6 +84,8 @@ def initialize():
         "auto_domain":"기타", "auto_file_classes":[], "auto_warnings":[],
         "dataset_revision":0, "autodata_source_sha":"", "domain_overrides":{},
         "auto_generation_provider":"원문 발췌 (무료)",
+        "manual_reference":"", "manual_reference_verified_sig":"",
+        "dataset_reference_confirmed":False,
     }
     for k,v in initial.items():
         if k not in st.session_state:st.session_state[k]=v
@@ -152,16 +156,20 @@ def set_dataset(drafts, source, classes, warnings):
     st.session_state.auto_domain=classes[0].domain if classes else "기타"
     st.session_state.auto_warnings=warnings
     st.session_state.dataset_revision+=1
-    st.session_state.selected_case={}
-    st.session_state.selected_case_id=""
-    st.session_state.dataset_reference_confirmed=False
-    st.session_state.manual_reference_verified_sig=""
+    if drafts:
+        apply_case_to_qa(st.session_state, drafts[0])
+    else:
+        st.session_state.selected_case={}
+        st.session_state.selected_case_id=""
+        st.session_state.question=""
+        st.session_state.external_response=""
+        st.session_state.manual_reference=""
+        st.session_state.dataset_reference_confirmed=False
+        st.session_state.manual_reference_verified_sig=""
 
 
 def manual_reference_verified(question):
-    text=st.session_state.get('manual_reference','').strip()
-    signature=hashlib.sha256((question.strip()+"\x00"+text).encode('utf-8')).hexdigest()
-    return bool(text) and st.session_state.get('manual_reference_verified_sig')==signature
+    return question.strip()==st.session_state.get("question", "").strip() and is_reference_verified(st.session_state)
 
 def make_report(target,answer,question,rubric,scope,web_data=None,case=None,*,
                 judges_selected=None,ragas_config=None):
@@ -274,6 +282,10 @@ with file_tab:
         st.session_state.autodata_source_sha="";st.session_state.auto_file_classes=[]
         st.session_state.domain_overrides={}
         st.session_state.datasets=[];st.session_state.selected_case={}
+        st.session_state.selected_case_id=""
+        st.session_state.question="";st.session_state.external_response=""
+        st.session_state.manual_reference="";st.session_state.manual_reference_verified_sig=""
+        st.session_state.dataset_reference_confirmed=False
         st.session_state.auto_domain="기타";st.session_state.dataset_source="원본 파일 없음"
     records=st.session_state.records
     if records:
@@ -335,13 +347,15 @@ with data_tab:
                     st.session_state.dataset_source=dataset_upload.name
                     st.session_state.dataset_fingerprint=sha
                     st.session_state.dataset_revision+=1
-                    st.session_state.selected_case={}
+                    if st.session_state.datasets:
+                        apply_case_to_qa(st.session_state,st.session_state.datasets[0])
                     st.success(f"{len(st.session_state.datasets)}건 데이터셋을 불러왔습니다. 검토 상태는 초기화되었습니다.")
                 except Exception as e:safe_error(e)
         if st.button("공개 가상 샘플로 초기화"):
             st.session_state.datasets=[{**r,"review_status":"검토 필요"} for r in SAMPLE_CASES]
             st.session_state.dataset_fingerprint="";st.session_state.dataset_source="공개 가상 샘플"
             st.session_state.dataset_revision+=1
+            apply_case_to_qa(st.session_state,st.session_state.datasets[0])
             st.rerun()
     cases=st.session_state.datasets
     st.caption(f"데이터셋: {st.session_state.dataset_source} · {len(cases)}건 · 저장 위치: 현재 브라우저 세션")
@@ -369,9 +383,10 @@ with data_tab:
                         row[key]=v;row['review_status']='검토 필요';changed+=1
             if changed:
                 st.session_state.dataset_revision+=1
-                st.session_state.dataset_reference_confirmed=False
-                st.session_state.selected_case={}
-                st.success(f"{changed}개 항목을 저장했습니다. 변경된 사례는 다시 검토해 주세요.")
+                current_id=st.session_state.selected_case_id
+                updated_case=next((c for c in cases if c.get('case_id')==current_id),cases[0])
+                apply_case_to_qa(st.session_state,updated_case)
+                st.success(f"{changed}개 항목을 저장했습니다. 변경된 사례는 ③의 기준답변에도 미확정 초안으로 반영됩니다.")
                 st.rerun()
             else:st.info("변경된 내용이 없습니다.")
         st.divider()
@@ -390,6 +405,9 @@ with data_tab:
             # Use stable ID labels because Streamlit cannot hash dicts consistently.
             pick=st.selectbox("검토할 케이스",[r['case_id'] for r in filtered],key="chosen_auto_case_id")
             row=next(r for r in filtered if r['case_id']==pick)
+            if st.session_state.selected_case_id != pick:
+                apply_case_to_qa(st.session_state,row)
+            st.caption("선택한 사례의 질문·기준답변 초안은 ③ 질문·답변 화면에 자동 입력됩니다. 원문 확정 전에는 평가용 정답으로 인정하지 않습니다.")
             st.markdown("**질문**");st.write(row['question'])
             st.markdown("**기준답변 초안**");st.write(row.get('reference_answer',''))
             st.markdown("**원문 근거**")
@@ -413,15 +431,12 @@ with data_tab:
                     st.error("인용문 검증에 실패했습니다.")
                 else:
                     row['review_status']='확정'
-                    if st.session_state.selected_case_id==pick:st.session_state.selected_case=row.copy()
-                    st.success("현재 사례만 기준답변을 확정했습니다.")
-            if capply.button("③ 질문·답변 화면에 가져오기",use_container_width=True):
-                st.session_state.selected_case=row.copy()
-                st.session_state.selected_case_id=pick
-                st.session_state.question=row['question']
-                st.session_state.external_response=row.get('candidate_answer','')
-                st.session_state.manual_reference=''
-                st.session_state.manual_reference_verified_sig=''
+                    confirmed_sync=confirm_loaded_case_if_matching(st.session_state,row)
+                    st.success("현재 사례의 원문 검토를 확정했습니다." +
+                               (" ③ 기준답변의 확정 상태에도 반영했습니다." if confirmed_sync else
+                                " ③의 내용이 수정된 상태라면 다시 사례를 불러와 주세요."))
+            if capply.button("③에 질문·기준답변·평가대상답변 다시 불러오기",use_container_width=True):
+                apply_case_to_qa(st.session_state,row)
                 st.rerun()
             st.markdown("#### 평가대상 AI 답변 생성 (선택)")
             st.caption("기준답변과 달리 candidate_answer는 실제 평가를 받는 모델의 응답입니다. 비워둬도 데이터셋으로 저장할 수 있습니다.")
@@ -457,23 +472,26 @@ with data_tab:
 with qa_tab:
     st.subheader("AI 답변 생성·등록")
     case=st.session_state.selected_case
-    if case:st.caption("적용된 데이터셋: "+case.get('case_id','')+" · "+case.get('category',''))
+    if case:
+        st.caption("②에서 자동으로 불러온 사례: "+case.get('case_id','')+" · "+case.get('category',''))
+        if case.get("review_status")!="확정":
+            st.info("②에서 생성된 기준답변 **초안**이 입력되었습니다. 원문 확인·확정 전에는 RAGAS 정답형 지표에 사용되지 않습니다.")
     question=st.text_area("사용자 질문",key="question",height=120,max_chars=2800)
     external=st.text_area("외부 모델 답변 (붙여넣기)",key="external_response",height=170,max_chars=8500)
-    st.markdown("**RAGAS를 위한 검증된 기준 답변 (선택)**")
-    st.text_area("기준 답변(reference_answer) 직접 입력",key="manual_reference",height=100,max_chars=4500,
-                 help="Factual Correctness 및 비LLM 문자열지표 비교용. 원문으로 확인된 정답만 입력하세요.")
+    st.markdown("**RAGAS 기준답변 (② 데이터셋에서 자동 입력, 수정 가능)**")
+    st.text_area("기준답변(reference_answer) · 초안은 검토 후 확정",key="manual_reference",height=160,max_chars=4500,
+                 help="②의 선택 사례 기준답변이 자동 입력됩니다. 원문으로 검토·확정하기 전에는 평가에 사용되지 않습니다.")
     if st.button("현재 질문·정답을 원본과 대조한 것으로 확정",key="confirm_reference",
                  disabled=not bool(question.strip() and st.session_state.get('manual_reference','').strip())):
         value=st.session_state.manual_reference.strip()
-        st.session_state.manual_reference_verified_sig=hashlib.sha256(
-            (question.strip()+"\x00"+value).encode('utf-8')).hexdigest()
-    st.caption("기준답변 검증 상태: "+("확정 (현재 질문에만 유효)" if manual_reference_verified(question) else "미확정 · RAGAS 정답형 지표에 사용 안 함"))
+        st.session_state.manual_reference_verified_sig=reference_signature(question,value)
+    st.caption("기준답변 검증 상태: "+("확정 (현재 질문·답변에만 유효)" if manual_reference_verified(question) else "미확정 · RAGAS 정답형 지표에 사용 안 함"))
     if question and detect_sensitive(question):st.warning("질문에 개인정보로 보이는 패턴이 있습니다. 외부 전송하지 않기를 권고합니다.")
     if case:
-        with st.expander("데이터셋의 기대답변·기대행동 (참고, 정답 확정 아님)"):
-            st.write(case.get('reference_answer') or '미설정')
-            st.caption(case.get('expected_behavior',''))
+        with st.expander("②에서 연결된 원문 근거·기대행동 확인",expanded=False):
+            st.caption(f"근거 파일: {case.get('source_file') or '미지정'} · {case.get('source_location') or '위치 미지정'}")
+            st.code(case.get('source_quote') or case.get('context') or '근거 미지정', language=None)
+            st.caption("기대행동: "+case.get('expected_behavior',''))
     cols=st.columns(3)
     pressed=[cols[i].button(name,use_container_width=True,disabled=(access_type=="운영자 무료 체험"))
              for i,name in enumerate(["GPT로 답변 생성","Gemini로 답변 생성","두 모델 모두 생성"])]
@@ -525,8 +543,9 @@ with judge_tab:
                key="ragas_metric_choice")
         st.dataframe(pd.DataFrame([{"지표":m,"필요조건":ragas_metric_requirements(m)} for m in
              list(RAGAS_NON_LLM)+list(RAGAS_LLM)]),hide_index=True,use_container_width=True)
-    st.checkbox("② 탭에서 개별 확정한 기준답변을 RAGAS 정답형 지표에 사용",key="dataset_reference_confirmed",
-                help="해당 사례의 'review_status=확정'과 이 확인을 모두 충족할 때에만 reference_answer를 평가에 전달합니다.")
+    st.checkbox("②에서 확정된 기준답변을 RAGAS 정답형 지표에 사용",key="dataset_reference_confirmed",
+                disabled=(st.session_state.selected_case or {}).get("review_status") != "확정",
+                help="② 원문 검토·확정 시 기본 활성화됩니다. 기준답변을 임의로 수정했다면 다시 검증해야 합니다.")
     st.markdown("#### ② LLM-as-a-Judge 평가자 선택")
     col_j1,col_j2=st.columns(2)
     use_gpt=col_j1.checkbox("GPT로 별도 심사",value=True,key="judge_gpt_switch")
@@ -546,7 +565,9 @@ with judge_tab:
         targets=[t for t in targets if t=='외부 입력 답변']
         st.caption("운영자 무료 체험: 외부 답변 1건에 대해 GPT·Gemini 각각 1회 평가, 웹 검색 불가")
     if not chosen_judges and not ragas_llm and not manual_reference_verified(st.session_state.question) and not (
-            st.session_state.get('dataset_reference_confirmed') and (st.session_state.selected_case or {}).get('review_status')=='확정'):
+            can_use_reviewed_case_reference(st.session_state.selected_case or {}, st.session_state.question,
+                                            st.session_state.get('manual_reference',''),
+                                            st.session_state.get('dataset_reference_confirmed',False))):
         st.warning("GPT·Gemini 미선택 + RAGAS LLM 미사용 상태에서는 검증된 기준 답변을 입력해야 계산 가능한 정량 지표가 생깁니다.")
     if st.button("선택한 답변의 평가 실행",type="primary",use_container_width=True):
         try:
@@ -565,7 +586,9 @@ with judge_tab:
                 active_case=st.session_state.selected_case if (st.session_state.selected_case and
                     st.session_state.selected_case.get('question')==st.session_state.question) else {}
                 # User-supplied reference must be explicitly confirmed for the exact question.
-                if not (st.session_state.get('dataset_reference_confirmed') and active_case.get('review_status')=='확정'):
+                if not can_use_reviewed_case_reference(active_case,st.session_state.question,
+                                                       st.session_state.get("manual_reference", ""),
+                                                       st.session_state.get("dataset_reference_confirmed",False)):
                     active_case={**active_case,"reference_answer":""}
                 if manual_reference_verified(st.session_state.question):
                     active_case={**active_case,"question":st.session_state.question,
@@ -588,7 +611,7 @@ with judge_tab:
                 if (not rubric and chosen_judges) or not batch or not st.session_state.records:raise ValueError("배점·사례·원본 근거 파일을 확인하세요.")
                 for cid in batch:
                     c=next(r for r in ready if r['case_id']==cid)
-                    source_case=c if (st.session_state.get('dataset_reference_confirmed') and c.get('review_status')=='확정') else {**c,'reference_answer':''}
+                    source_case=c if c.get("review_status")=="확정" else {**c,"reference_answer":""}
                     r=make_report('데이터셋 대상 답변',c['candidate_answer'],c['question'],rubric,'업로드 파일만',case=source_case,
                                   judges_selected=chosen_judges,
                                   ragas_config={"llm":ragas_llm,"model":ragas_model,"metrics":chosen_ragas})
