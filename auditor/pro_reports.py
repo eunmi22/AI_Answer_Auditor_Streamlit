@@ -1,4 +1,4 @@
-"""Spreadsheet report combining answer tests, assurance 28-control checklist, and risk model.
+"""Spreadsheet report combining RAGAS, selected judges, assurance and risk model.
 Excel formula injection is prevented by write_string() for all untrusted strings.
 """
 from __future__ import annotations
@@ -37,10 +37,10 @@ def professional_report(reports, framework_rows, risk_rows, service, dataset_row
     sh.write('A1','AI 서비스 전문 평가 보고서',title)
     cover=[('서비스명',service.get('서비스명','')),('운영 도메인',service.get('도메인','')),
            ('서비스 유형',service.get('유형','')),('적용 범위','답변 품질 + 28개 관리통제 + 16개 잔여위험'),
-           ('답변 평가건수',len(reports)),('관리통제 평가 완료',f"{comp['reviewed']}/{comp['applicable']} (해당없음 제외)"),
+           ('답변 평가건수',len(reports)),('평가기술','정식 RAGAS 0.4.4 + 사용자 선택 GPT/Gemini LLM-as-Judge'),('관리통제 평가 완료',f"{comp['reviewed']}/{comp['applicable']} (해당없음 제외)"),
            ('관리통제 충족',comp['fully_met']),('관리통제 미충족',comp['unmet']),
            ('잔여위험 점수',risk['score'] if risk['score'] is not None else '평가보류'),
-           ('잔여위험 등급',risk['grade']),('해석 한계','답변 검증은 시스템 통제 증명이 아님. 문서가 없는 항목은 미평가이며 전체 적합/인증 판정을 하지 않습니다.'),
+           ('잔여위험 등급',risk['grade']),('해석 한계','RAGAS 점수와 LLM 심사 점수는 서로 다른 척도로 합산하지 않음. 답변 검증은 시스템 통제 증명이 아님. 문서가 없는 항목은 미평가이며 전체 적합/인증 판정을 하지 않습니다.'),
            ('금융AI 평가기준 출처',FRAMEWORK_SOURCE),('잔여위험 산정 출처',RISK_SOURCE)]
     for i,(a,b) in enumerate(cover,2):
         sh.write_string(i,0,text(a),head); sh.write_string(i,1,text(b),body); sh.set_row(i,48 if len(str(b))>70 else 26)
@@ -48,8 +48,17 @@ def professional_report(reports, framework_rows, risk_rows, service, dataset_row
     for r in reports:
         rows.append([r.get('timestamp',''),r.get('case_id',''),r.get('domain',''),r.get('category',''),r.get('question',''),r.get('target',''),
                      r.get('judges',{}).get('GPT',{}).get('total',''),r.get('judges',{}).get('Gemini',{}).get('total',''),
-                     ', '.join(r.get('disagreements',[])),r.get('mode','')])
-    sheet('답변 평가목록',['일시','사례ID','도메인','평가유형','질문','대상답변','GPT','Gemini','재검토항목','근거범위'],rows,[24,14,22,20,78,24,12,12,30,20])
+                     ', '.join(r.get('disagreements',[])),r.get('mode',''),r.get('assessment_status','')])
+    sheet('답변 평가목록',['일시','사례ID','도메인','평가유형','질문','대상답변','GPT','Gemini','재검토항목','근거범위','평가상태'],rows,[24,14,22,20,78,24,12,12,30,20,55])
+    ragas_rows=[]
+    for r in reports:
+        for v in (r.get('ragas') or {}).get('metrics',[]):
+            ragas_rows.append([r.get('case_id',''),r.get('target',''),r.get('question',''),
+                               v.get('metric',''),v.get('status',''),v.get('score') if v.get('score') is not None else '',
+                               v.get('engine','RAGAS'),(r.get('ragas') or {}).get('version',''),
+                               (r.get('ragas') or {}).get('llm_model',''),v.get('reason','')])
+    sheet('RAGAS 지표',['사례ID','평가대상','질문','지표','상태','점수(0~1)','엔진','버전','평가모델','판정/미실시 사유'],
+          ragas_rows,[14,28,82,28,16,14,14,15,22,92])
     scores=[]; claims=[]; limitations=[]
     for r in reports:
         for judge,e in r.get('judges',{}).items():

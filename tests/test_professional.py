@@ -95,7 +95,8 @@ def test_export_all_sheets():
     from openpyxl import load_workbook
     workbook=load_workbook(io.BytesIO(payload),read_only=True)
     try:
-        assert len(workbook.sheetnames)==8
+        assert len(workbook.sheetnames)==9
+        assert "RAGAS 지표" in workbook.sheetnames
         assert workbook['안전성 신뢰성 28'].max_row==29
         assert workbook['잔여위험 16'].max_row==17
         assert workbook['평가 데이터셋'].max_row==len(SAMPLE_CASES)+1

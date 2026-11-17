@@ -6,6 +6,7 @@ import os
 from typing import Dict, List
 
 FIELDS = ["case_id", "domain", "service_type", "category", "question", "reference_answer", "expected_behavior", "context", "candidate_answer"]
+EXTRA_FIELDS = ["source_id", "source_quote", "source_file", "source_location", "review_status", "generation_method"]
 ALIASES = {"사례ID":"case_id", "도메인":"domain", "AI유형":"service_type", "평가유형":"category", "질문":"question",
            "기대답변":"reference_answer", "기대행동":"expected_behavior", "참조문맥":"context", "평가대상답변":"candidate_answer"}
 SAMPLE_CASES=[
@@ -22,6 +23,10 @@ SAMPLE_CASES=[
 def _normalize(row: dict, index: int) -> Dict:
     row={ALIASES.get(str(k or '').strip(),str(k or '').strip()): v for k,v in row.items()}
     result={name:str(row.get(name,'') or '').strip()[:3500] for name in FIELDS}
+    result.update({name:str(row.get(name,'') or '').strip()[:1800] for name in EXTRA_FIELDS})
+    # Importing a status cell from a CSV does not verify the answer.
+    # An attacker should never be able to import a forged "확정" flag.
+    result["review_status"]="검토 필요"
     result["case_id"]=(result["case_id"] or f"CASE-{index:04d}")[:64]
     if not result["question"]:
         raise ValueError(f"{index}행: 질문(question)이 비어 있습니다.")

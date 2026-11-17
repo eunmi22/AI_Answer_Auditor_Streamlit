@@ -46,25 +46,32 @@ def excel_report(report: Dict) -> bytes:
     sh.write("A1", "AI 답변 신뢰성 평가보고서", title)
     from .evaluation import risk_level
     scores_all = [e.get("total", 0) for e in report.get("judges", {}).values()]
-    average_score = round(sum(scores_all)/len(scores_all), 1) if scores_all else 0
+    average_score = round(sum(scores_all)/len(scores_all), 1) if scores_all else None
     fields = [
         ("평가 일시", report.get("timestamp", "")), ("질문", report.get("question", "")),
         ("답변 구분", report.get("target", "")), ("검증 모드", report.get("mode", "")),
         ("평가 대상 답변", report.get("answer", "")),
-        ("평균 종합점수", average_score),
-        ("잠정 위험등급", risk_level(average_score)),
-        ("종합평가", "두 모델의 독립적인 AI 판단이며, 사실의 확정적 검증 또는 RAGAS 원본 구현 결과가 아닙니다."),
+        ("선택된 심사모델", ", ".join(report.get("selected_judges", list(report.get('judges',{})))) or "선택하지 않음"),
+        ("LLM 심사 평균", average_score if average_score is not None else "미실시"),
+        ("잠정 위험등급", risk_level(average_score) if average_score is not None else "판정 보류"),
+        ("종합평가", "정식 RAGAS 수치와 선택형 GPT/Gemini 평가 점수는 별도 척도임. 한쪽 점수가 없으면 종합평균을 생성하지 않음."),
     ]
     for i, (key, val) in enumerate(fields, 3):
         sh.write_string(i, 0, key, header)
         sh.write_string(i, 1, _safe(val), body)
         sh.set_row(i, 60 if key in ("질문", "평가 대상 답변") else 28)
-    sh.write("A14", "평가 모델", header)
-    sh.write("B14", "종합점수", header)
-    for i, (judge, ev) in enumerate(report.get("judges", {}).items(), 14):
+    sh.write("A17", "평가 모델", header)
+    sh.write("B17", "종합점수", header)
+    for i, (judge, ev) in enumerate(report.get("judges", {}).items(), 17):
         sh.write_string(i, 0, judge, body)
         sh.write_number(i, 1, ev["total"], number)
 
+    rr=report.get('ragas') or {}
+    ragas_rows=[[m.get('metric',''),m.get('status',''), m.get('score') if m.get('score') is not None else '',
+                 m.get('engine','RAGAS'),rr.get('version',''),rr.get('llm_model',''),m.get('reason','')]
+                for m in rr.get('metrics',[])]
+    table("RAGAS정량지표",["RAGAS 지표","실행 상태","점수(0~1)","평가엔진","버전","RAGAS LLM","비고/미실시 사유"],
+          ragas_rows,[30,15,16,17,18,20,85])
     scores = []
     findings = []
     checklists = []
@@ -95,7 +102,7 @@ def excel_report(report: Dict) -> bytes:
 def csv_history(reports: List[Dict]) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["평가일시", "질문", "답변출처", "근거모드", "GPT평가", "Gemini평가", "평균", "차이발생 항목"])
+    writer.writerow(["평가일시", "질문", "답변출처", "근거모드", "GPT평가", "Gemini평가", "LLM심사평균", "차이발생 항목", "평가상태", "RAGAS 지표 결과"])
     for r in reports:
         judges = r.get("judges", {})
         scores = [e["total"] for e in judges.values()]
@@ -103,5 +110,8 @@ def csv_history(reports: List[Dict]) -> bytes:
         writer.writerow([_safe(r.get("timestamp", "")), _safe(r.get("question", "")),
                          _safe(r.get("target", "")), _safe(r.get("mode", "")),
                          judges.get("GPT", {}).get("total", ""), judges.get("Gemini", {}).get("total", ""),
-                         round(sum(scores)/len(scores), 1) if scores else "", _safe(diff)])
+                         round(sum(scores)/len(scores), 1) if scores else "", _safe(diff),
+                         _safe(r.get('assessment_status','')),
+                         _safe('; '.join(f"{m.get('metric')}: {m.get('score') if m.get('score') is not None else m.get('status')}" for m in
+                               (r.get('ragas') or {}).get('metrics',[])))])
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")
